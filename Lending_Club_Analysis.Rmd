@@ -1,0 +1,454 @@
+---
+title: "Payoff_Takehome_Assessment"
+author: "Vaibhav Walvekar"
+date: "January 10, 2017"
+output: pdf_document
+---
+
+Dataset details: The lending club dataset is a collection of installment loan records, including credit grid data (e.g. FICO, revolving balance, etc.) and loan performance (e.g. loan status).
+
+The data is stored in a postgres database on AWS. Please use the below information to connect to the database with your tool of choice to access the data (R, Python, SQL, etc.)
+
+dbname = "intern"
+host = "interndb-2.ctranyfsb6o1.us-east-1.rds.amazonaws.com"
+port = 5432
+user = "payoff_intern"
+password = 'reallysecure'
+
+There are 4 tables for you to use:
+. lending_club_2007_2011
+. lending_club_2012_2013
+. lending_club_2014
+. lending_club_2015
+
+Please also use the Lending Club data dictionary as a reference:
+https://dl.dropboxusercontent.com/u/1764371/Lending%20Club%20Data%20Dictionary/LCDataDictionary.xlsx
+
+```{r setup, results="hide"}
+
+# Loading standard libraries
+library(tidyverse)
+library(ggplot2)
+library(zoo)
+library(MASS)
+library(ROCR)
+library(glmnet)
+library(randomForest)
+require("RPostgreSQL")
+
+#loading PostgreSQL driver
+driver <- dbDriver("PostgreSQL")
+
+#Opening Connection to database on aws host 
+con <- dbConnect(driver, dbname = "intern",
+                 host = "interndb-2.ctranyfsb6o1.us-east-1.rds.amazonaws.com", port = 5432,
+                 user = "payoff_intern", password = "reallysecure")
+
+#Querying all four datsets from the database
+lending_club_2007_2011 <- dbGetQuery(con, "SELECT * from lending_club_2007_2011")
+lending_club_2012_2013 <- dbGetQuery(con, "SELECT * from lending_club_2012_2013")
+lending_club_2014 <- dbGetQuery(con, "SELECT * from lending_club_2014")
+lending_club_2015 <- dbGetQuery(con, "SELECT * from lending_club_2015")
+
+#Disconnecting from host
+dbDisconnect(con)
+dbUnloadDriver(driver)
+
+#Consolidating lending data of all years into one dataframe
+lending_club_consolidated <- rbind(lending_club_2007_2011,lending_club_2012_2013,
+                                   lending_club_2014,lending_club_2015)
+
+#Removing these objects for memory management
+rm(lending_club_2007_2011)
+rm(lending_club_2012_2013)
+rm(lending_club_2014)
+rm(lending_club_2015)
+rm(con)
+rm(driver)
+```
+
+```{r Exploring Consolidated Lending dataset, results="hide"}
+dim(lending_club_consolidated)
+summary(lending_club_consolidated)
+```
+
+Based on the summary, cleaning consolidated lending dataset
+```{r Cleaning Consolidated Lending dataset}
+
+#Deleting row containing Memberid as NA (all columns are NA for this observation)
+lending_club_consolidated <- lending_club_consolidated[!is.na(
+  lending_club_consolidated$member_id),]
+
+#Converting id to numeric datatype
+lending_club_consolidated$id = as.numeric(lending_club_consolidated$id)
+
+#Creating a new column from issue_d as a date datatype
+lending_club_consolidated$issue_date<-as.Date(as.yearmon(lending_club_consolidated$issue_d,
+                                                         format = "%b-%Y"))
+
+#Creating a new column from earliest_cr_line as a date datatype
+lending_club_consolidated$earliest_cr_line_date<-
+  as.Date(as.yearmon(lending_club_consolidated$earliest_cr_line, format = "%b-%Y"))
+
+#Converting interest rate to numeric datatype
+lending_club_consolidated$int_rate = as.numeric(gsub("\\%", "", 
+                                                     lending_club_consolidated$int_rate))
+
+#Converting revol_util to numeric datatype
+lending_club_consolidated$revol_util = as.numeric(gsub("\\%", "", 
+                                                       lending_club_consolidated$revol_util))
+
+#Converting term to numeric datatype
+lending_club_consolidated$term <- as.numeric(substr
+                                             (lending_club_consolidated$term,0,3))
+
+#Renaming columns to indicate correct units
+lending_club_consolidated <- dplyr::rename(lending_club_consolidated,
+                                           int_rate_percent=int_rate, revol_util_percent = 
+                                             revol_util, term_in_months = term)
+
+attach(lending_club_consolidated)
+
+```
+Below are two sections of data questions relating to the Lending Club dataset and another question that is not related to it. Please try and answer all the questions. Quality is much more important than quantity.
+
+Going through the dataset we can understand that Lending club dataset contains information about loan given out to people who have number of different purposes. The information has been captured from 2007 to 2015. There are 111 different columns. Some of the key columns with regards to below analysis are loan_amnt, grade, term, issue_d, loan_status, etc.
+
+1. Does the data have any outliers?
+
+Outliers are observations that are abnormally out of range of the other values for a random sample from the population. To find out outliers I looked at the summary of the consolidated lending dataset. This helped understand that mostly none of the features had such abnormal observations, except for a couple of important ones like annual_inc and tot_hi_cred_lim.
+
+```{r Outliers}
+#Removing na from annual_inc column
+lending_club_consolidated_filtered_annual_inc <- lending_club_consolidated[!is.na(annual_inc),]
+
+#Box Plot to find outliers - Annual Income
+ggplot(data=lending_club_consolidated_filtered_annual_inc,
+       aes(y=lending_club_consolidated_filtered_annual_inc$annual_inc, x=1)) + geom_boxplot() +
+  labs(title = "Box Plot - Annual Income", x = "Annual Income",  y = "")
+
+#Histogram to check for outliers - Annual Income
+ggplot(data=lending_club_consolidated_filtered_annual_inc,
+       aes(lending_club_consolidated_filtered_annual_inc$annual_inc)) +
+  geom_histogram(breaks=seq(0, 10000000, by = 100000), 
+                 col="red", 
+                 fill="green", 
+                 alpha = .2) +
+  labs(title = "Histogram - Annual Income", x = "Annual Income",  y = "Frequency")
+
+#Removing na from tot_hi_cred_lim column
+lending_club_consolidated_filtered_tot_cred <- lending_club_consolidated[!is.na(tot_hi_cred_lim),]
+
+#Box Plot to find outliers - Total High Credit Limit
+ggplot(data=lending_club_consolidated_filtered_tot_cred,
+       aes(y=lending_club_consolidated_filtered_tot_cred$tot_hi_cred_lim, x=1)) + geom_boxplot() +
+  labs(title = "Box Plot - Total High Credit Limit", x = "Total High Credit Limit",  y = "")
+
+#Histogram to check for outliers - Total High Credit Limit
+ggplot(data=lending_club_consolidated_filtered_tot_cred, 
+       aes(lending_club_consolidated_filtered_tot_cred$tot_hi_cred_lim)) +
+  geom_histogram(breaks=seq(0, 10000000, by = 100000), 
+                 col="red", 
+                 fill="green", 
+                 alpha = .2) +
+  labs(title = "Histogram - Total High Credit Limit", x = "Total High Credit Limit",
+       y = "Frequency")
+
+```
+
+From the above graphics we can see that some of the observations for annual_inc and tot_hi_cred_lim are outliers. This becomes very evident from the box plot where the 1st and 3rd quartiles are very near to the baseline and other values are abnormally higher. Logically, an annual income of $9500000 is abnormally high for a person applying for a loan. It also is clear from 3rd quartile value being almost 100 times lesser. Similarly for a credit limit of $9999999, is abnormally high when compared to 3rd quartile values is around $250000. Thus there are some outliers in the dataset which may have been captured due to wrong entry by the loan applicant.
+
+2. What is the monthly total loan volume by dollars and by average loan size?
+
+For us to look at the monthly trend of loan volume, we need group together loans issued in individual months. Following on that we can calculate monthly total loan volume by dollars and monthly total loan volume by average loan size.
+```{r Monthly total loan volume by dollars}
+#Grouping data by new created variable issue_date
+by_issue_date = group_by(lending_club_consolidated,issue_date)
+
+#Calculating total loan sum for each month 
+total_loan_by_dollars <- summarize(by_issue_date,totalsum = sum(loan_amnt,na.rm = TRUE))
+
+#Plotting the trend of total loan volume by dollars
+ggplot(total_loan_by_dollars, aes(x = issue_date, y = totalsum)) + 
+  geom_line( colour="blue") + labs(title = "Total loan volume by dollars", 
+                                   x = "Time (Issue_Date)",  y = "Loan in dollars")
+```
+
+From the above graphic we can see that the total loan issued per month was almost constant in the period from 2007-12, but after that there is a steep rise until mid of 2014 after which it has been quite fluctuating. 
+
+```{r Monthly total loan volume by average loan}
+#Calculating mean loan amount for each month 
+total_loan_by_avgsize <- summarize(by_issue_date,mean = mean(loan_amnt,na.rm = TRUE))
+
+#Plotting the trend of total loan volume by average loan size
+ggplot(total_loan_by_avgsize, aes(x = issue_date, y = mean)) + geom_line(colour="blue") +
+  labs(title = "Total loan volume by average loan size", x = "Time (Issue_Date)",
+       y = "Average Loan Size")
+```
+
+From above graphic we can see that total loan volume by average loan size has been steadily increaseing over the years although a dip is seen in the period between 2008-09. This dip may be on account of the 2008 financial crisis where the average loan issued took a hit.
+
+3. What are the default rates by Loan Grade?
+
+To calculate the default rates, we use the loan_status column which identifies the current status of the loan. As per my knowledge, the status of the loan changes from current  to late to default to charged off, if the loan is not payed before due date. Thus in order to calculate the percentage of default in each grade, I have also considered loans which were charged off. I am considering charged of loans because at some stage these loans were in default stage and due to no payment from the loan applicant the status have been moved to charged off. 
+
+```{r Default rates by Loan Grade}
+#Calculating proportion of loans in "Default", "Charged off" or 
+#"Does not meet the credit policy. Status:Charged Off" category per loan grade
+prop_by_grade_filtered <- lending_club_consolidated %>%
+          group_by(grade,loan_status) %>%
+          summarise (n = n()) %>%
+          mutate(proportion = n *100/ sum(n)) %>%
+          filter(loan_status == "Default" | loan_status== "Charged Off" |
+            loan_status == "Does not meet the credit policy. Status:Charged Off")
+
+#Grouping by grade from above output to calculate sum of percentage of 
+#all three loan status as considered above
+by_grade_aggregated = group_by(prop_by_grade_filtered,grade)
+default_prop_by_grade <- summarize(by_grade_aggregated,DefaultPercentage = 
+                                     sum(proportion,na.rm = TRUE))
+
+#Plotting Default rates by Loan Grade
+ggplot(default_prop_by_grade, aes(x = grade, y= DefaultPercentage)) + 
+  geom_bar(stat = "identity", colour="red") +
+  labs(title = "Default Rates by Loan Grade", x = "Loan Grade",  y = "Default Percentage") 
+```
+
+The bar plot shows the sum of default percentages per grade. We can see that the default percentages increase from grade A through G. This is expected as per lending club website because grade A is more risk free than grades through G.
+
+
+4. Are we charging an appropriate rate for risk?
+
+To answer this question we need to have a measure for risk. Assuming that we consider the likelihood of a loan getting "Charged off", "Default" or "Late" as the risk, we can calculate percentage of loans having such status per subgrade. Using this risk measure we can make plot of subgrade vs. risk. We can also find the correlation between risk and mean interest rate per subgrade, to answer our quastion more appropriately
+
+```{r}
+#Calculating proportion of loans in "Late", Default", "Charged off" or 
+#"Does not meet the credit policy. Status:Charged Off" category per loan sub grade
+prop_by_subgrade_filtered <- lending_club_consolidated %>%
+          group_by(sub_grade,loan_status) %>%
+          summarise (n = n()) %>%
+          mutate(proportion = n *100/ sum(n)) %>%
+          filter(loan_status == "Default" | loan_status== "Charged Off" |
+            loan_status == "Does not meet the credit policy. Status:Charged Off" 
+                                                          | loan_status == "Late")
+
+#Grouping by sub grade from above output to calculate sum of percentage
+#of all four loan status considered as risk
+by_sub_grade_aggregated = group_by(prop_by_subgrade_filtered,sub_grade)
+risk_prop_by_sub_grade <- summarize(by_sub_grade_aggregated,Risk = 
+                                      sum(proportion,na.rm = TRUE))
+
+#Grouping by subgrade using the original df to calculate accurate mean interest rate per sub grade
+by_sub_grade = group_by(lending_club_consolidated,sub_grade)
+int_rate_by_sub_grade <- summarize(by_sub_grade,Mean_Interest_Rate = 
+                                     mean(int_rate_percent,na.rm = TRUE))
+
+#Combining risk and interest rate dfs
+risk_int_rate_df <- merge(risk_prop_by_sub_grade, int_rate_by_sub_grade, by = c("sub_grade"))
+
+#Plotting Risk Percentage vs. Sub Grade
+ggplot(risk_int_rate_df, aes(x = sub_grade, y= Risk)) + geom_bar(stat = "identity", 
+                                                                 colour="red") +
+  labs(title = "Risk by Loan Sub Grade", x = "Loan Sub Grade",  y = "Risk Percentage") 
+
+#Finding correlation between Risk and Mean Interest rate per sub grade
+cor(risk_int_rate_df$Risk, risk_int_rate_df$Mean_Interest_Rate)
+```
+
+The correlation between Risk and Mean Interest rate is as high as 0.976. Thus we can say that we are actually charging appropriate rate for the risk. With increase in risk there is an increase in interest rate charged to the customers. From the graphic of Risk by Loan Sub Grade, it is expected that risk percentage should increase as we move from sub grades A1-A5 through G1-G5. This is very much the case, except for ris being less for G2, G3 and G4 than G1 and F5. Thus it could be case of miss categorizing customers to wrong sub grades. But overall, I would say we are charging an appropriate rate for risk.
+
+5. What are the top 5 predictors of default rate by order of importance? Explain the model that you used and discuss how you validated it.
+
+As assumed in the above questions, default on loan is followed by charged off, thus considering charged off status as also default, I am creating a new variable on the dataset which is a categorical variable indicating 1 for default and 0 for not default.
+
+```{r Creating new categorical variable}
+default_category = rep (0,nrow(lending_club_consolidated ))
+
+default_category [lending_club_consolidated$loan_status == "Default" | 
+                    loan_status== "Charged Off" | loan_status == 
+                    "Does not meet the credit policy. Status:Charged Off"]=1
+default_category<- as.factor(default_category)
+lending_club_consolidated = data.frame(lending_club_consolidated ,default_category)
+
+#Removing object for memory management
+rm(default_category)
+```
+
+As we discovered there are some outliers in our data, I would like to assume that these have been introduced due to human error and thus can removed from the dataset. For annual income, as the 3rd quartile is $90000, I would like to ignore values beyond $1,50,000, this is keeping in mind any person having an annual salary greater than $1,50,000 is less likely to apply for loan of 500 to 30000 dollars. Another outlier found was in tot_hi_cred_lim. The 3rd quartile value is $247777, thus a value of $500000 sounds reasonable for an upper limit. 
+
+```{r Removing outliers from the dataset}
+lending_club_consolidated_no_outliers <- filter(lending_club_consolidated, 
+                                                annual_inc<150000, 
+                                                tot_hi_cred_lim<500000)
+```
+
+Now to create a model to predict default rate, I plan to logically cut down the features to 20-25 as many of the features in the dataset arent very useful for prediction. The required subset of features according to my understanding are captured into the new dataframe as below: 
+
+```{r }
+
+#Required columns for model generation
+mycols <- c("loan_amnt", "int_rate_percent", "grade", "sub_grade", "annual_inc", 
+            "verification_status", "term_in_months", "dti", "earliest_cr_line_date", 
+            "inq_last_6mths", "open_acc", "pub_rec", "revol_bal","revol_util_percent",
+            "total_acc", "initial_list_status", "application_type", "acc_now_delinq", 
+            "pymnt_plan", "delinq_2yrs","installment", "addr_state","issue_date",
+            "default_category")
+
+#Creating new dataframe
+lending_club_model_df <- lending_club_consolidated_no_outliers[mycols]
+
+#Removing a dataframe for memory management
+rm(lending_club_consolidated_no_outliers)
+
+#Ommiting all NA values from the dataset
+lending_club_model_df <- na.omit(lending_club_model_df)
+```
+
+NA values hinder in building an efficient model and since there are only small portion rows containing NA's, I am ignoring them.
+
+As we are trying to predict a qualitative variable, if there is a default or not on a loan, I plan to use Logistic regression for building the model. Firsty, setting the seed as to achieve same result on each run and avoid different random sampling on each iteration. Secondly, segregating dataset into train and test. Thirdly, running glm function for logistic regression.
+
+Note : Due to computational restrictions, I am reducing the size of dataset to 10%  of the actual lending_club_model_df. 
+
+
+```{r Applying logistic regression to predict default category}
+set.seed(1)
+#Reducing size of the dataset because of computational restrictions
+reduced_population_size <- sample(nrow(lending_club_model_df), 
+                                  nrow(lending_club_model_df)*0.1)
+reduced_lending_club_model_df <- lending_club_model_df[reduced_population_size, ]
+
+#Segregating training and test data
+train <- sample(nrow(reduced_lending_club_model_df), 
+                nrow(reduced_lending_club_model_df)*0.7)
+lending_club_model_df.train <- reduced_lending_club_model_df[train, ]
+lending_club_model_df.test <- reduced_lending_club_model_df[-train, ]
+
+#Fitting logistic regression model
+logit.fit <- glm ( default_category ~ .,
+                  data = lending_club_model_df.train , family = "binomial" )
+
+summary(logit.fit)
+
+#Predicting on test data
+logit.probs <- predict(logit.fit, newdata = lending_club_model_df.test, type = "response")
+logit.probs <- ifelse(logit.probs > 0.5, 1, 0)
+
+#Confusion Matrix
+confmatrix_default_category<- table(lending_club_model_df.test$default_category,
+                                    logit.probs)
+confmatrix_default_category
+
+#Accuracy of the model
+sum(diag(confmatrix_default_category))/sum(confmatrix_default_category)
+
+#Checking performance of the model by plotting ROC curve
+pr <- prediction(logit.probs, lending_club_model_df.test$default_category)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf, col=rainbow(5))
+
+#Area under the curve
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+```
+
+From the model generated, there are some variables which have little statistical significance as the pvalue is greater than 0.05. Thus these can be ignored while building the final model. Now, to understand the accuracy and performance of the model, we can look at the confusion matrix. It has a very good accuracy level though there are 1287 falsepositive and 3 Falsenegatives which are misclassified. To understand the performance of the model, we look at the ROC curve. As the AUC is very small, the performance of the model is not great. High performing models have ROC curve touching the top left orner and covering more area. Thus addition of deletion of features are required for the model. We can also look at AIC which is a measure of goodness of fit and can be used for model selection.
+
+Now to reduce the number of features and select the best set of features, we can choose between backward subset selection method or lasso regression. In backward stepwise selection, a model with all features is considered initially and then based on performance of the model one or more features are removed and the process is continued untill we get the best mode. 
+
+In case of Lasso, the coefficients of the features which are not as significant are reduced to zero. 
+```{r  Backward stepwise selection and Lasso}
+#Backward
+step(glm ( default_category ~ .,
+                  data = lending_club_model_df.train , family = "binomial" ),
+     direction = "backward")
+
+#Creating matrix for Lasso
+X <- model.matrix(default_category ~., data = lending_club_model_df.train)[,-1]
+
+lending_club_model_df.train$default_category = 
+  as.numeric(lending_club_model_df.train$default_category)
+#Applying logistic regression using glmnet, which gives same result as glm 
+#when used with alpha = 1
+fit <- glmnet(X, lending_club_model_df.train$default_category, alpha = 1,family="binomial")
+
+#Cross validating to find best lambda which will reduce insignificant coefficients to zero
+cv.out <- cv.glmnet(X, lending_club_model_df.train$default_category, alpha = 1)
+bestlambda <- cv.out$lambda.min
+bestlambda
+
+#Using best lambda and fitting logistic to find optimum fit model
+fit_best <- glmnet(X, lending_club_model_df.train$default_category, lambda = bestlambda)
+coef(fit_best)
+
+```
+
+Though the model coefficients vary between backward stepwise selection model and lasso model, we are able to find the best features required for predicting default category of the loan.
+Depending the coefficeints magnitude though we can gauge the importance of the predictors, but it wont be completely correct.
+
+As we havent found a sufficiently satisfactory model, I would like to fit random forest to predcit default category.
+```{r Random Forest}
+
+lending_club_model_df.train$grade <- as.factor(lending_club_model_df.train$grade)
+lending_club_model_df.test$grade <- as.factor(lending_club_model_df.test$grade)
+lending_club_model_df.train$default_category = 
+  as.factor(lending_club_model_df.train$default_category)
+
+#Fitting Random Forest
+rf.fit <- randomForest(default_category ~ loan_amnt +
+                         int_rate_percent+grade+annual_inc+term_in_months+dti+
+                         inq_last_6mths+revol_util_percent+total_acc+issue_date+
+                     installment+earliest_cr_line_date,
+                       data = lending_club_model_df.train)
+
+#Predicting using random forest model
+rf.probs <- predict(rf.fit, newdata = lending_club_model_df.test)
+
+#Calculating Accuracy using confusion matrix
+confmatrix_rf_new<-table(rf.probs,lending_club_model_df.test$default_category)
+confmatrix_rf_new
+sum(diag(confmatrix_rf_new))/sum(confmatrix_rf_new)
+
+#Plotting performance of model using ROC curve
+probRF <- predict(rf.fit, newdata = lending_club_model_df.test, type='prob')
+predRF <- prediction(probRF[,2],lending_club_model_df.test$default_category)
+perfRF <- performance(predRF, measure = "tpr", x.measure = "fpr")
+plot(perfRF, col=rainbow(5),main = "ROC for Random Forest" )
+
+#Finding importance of variables in the model
+importance(rf.fit)
+#Plotting importance of variables in the model
+varImpPlot(rf.fit,main = "Variable Importance")
+```
+
+From the model generated by fitting random forest, the accuracy of the predictions is quite comparable to the Logistic model but performance of this model is far better. This can be seen in the graphic as the ROC curve covers larger area. Moving on to the importance of the predictors, the top five predictors according to variable importance plot based on the random forest model are dti, revol_util_percent, earliest_cr_line_date, issue_date and installment.
+
+6. Select one of the below topics and concisely explain it to:
+
+I would like to explain Logistic Regression.
+
+a. someone with significant mathematical experience
+
+The outcomes of many of the experiments/research are qualitative or categorical and they can be predicted or categorized into classes using methods like Logistic Regression. Thus logistic regression is used to predict a variable which has discrete values and is not continuous. Logistic regression approach calculates the probability of each of the categories of the response variable. This probability is then used to categorize the response variable Y. The function used to predict qualitative variables has to have outputs between 0 and 1. Thus we use logistic function, 
+$$p(X) = e^{\beta0 + \beta1*X}/1 + e^{\beta0 + \beta1*X}$$ 
+$\beta0$ and $\beta1$ are the unknown coefficients. To evaluate these coefficients we can estimate based on available training data using methods like Maximum likelihood. The idea behind finding estimates is that we find estimates for $\beta0$ and $\beta1$ such that the predicted probability $p\hat{}(x_{i})$ is as close indicative of the class that the response belongs to. For example, if we consider a scenario where we are predicting a default on a loan payment as in the above examples. The estimates calculated for $\beta0$ and $\beta1$ once put in above equation should give a response $$p(X)$$ closer to 1 for defaultors and close to 0 for individuals who did not default. The maximum likelihood function used to evaluate $\beta0$ and $\beta1$ is as below:
+
+$$l(\beta0,\beta1) = \pi_{i,j = 1} p(x_{i} )*\pi_{i`,j` =0} p(1-x_{i`})$$ 
+The $\beta0$ and $\beta1$ are calculated by maximizing the above function. Once the estimates are caluclated, we an use them to classify new test observations by calculating the p(X).
+
+Logistic function will always produce an S shaped curve which would swiftly move from one category represented by 0 to another category represented by 1 for bimodal categorical variables. Some manipulation of logistic function leads to below formula:
+$$p(X)/1-p(X) = e^{\beta0 + \beta1*X} $$ 
+The equation on the left hand side is called the odds and they can range from 0 to infinity. From the above example odd close to 0 indicate lwould mean ow probability of default and high probability of default for odds nearing infinity. Another important concept to know about logistic regression is that log-odds are linear in X. Log-odds is also known as logit. 
+$$log(p(X)/1-p(X)) = \beta0 + \beta1*X $$ 
+Thus interpreting the above result we can say that a unit change in X causes the log odds to change by $\beta1$. Thus in conclusion we can say that there is no linear relationship between p(X) and X. An increase or decrease in X will cause p(X) to increase or decrease depending on the sign of $\beta1$.
+
+
+b. someone with little mathematical experience.
+
+As one starts with a research project, there are number of instances when the response variable is qualitative or categorical. The prediction of qualitative response variable involves segreagating responses into different classes and this is achieved by many different methods of which one is logistic regression. For the basis of classification, logistic regression predicts the probability of each of the categories of a qualitative variable. 
+A simple example of classification which can be solved using logistic regression is of classifying if the email recieved by a person is a spam or not. To classify this email, we use the data from previous emails as training observations. The data that can be useful could like the subject line, specific words in email, domain of email sender, etc.Using this data a model is developed which has an output between 0 and 1. Lets assume according to our model we considered 0 as no spam and 1 as spam. Using any new email as a test observation, if the model outputs a value greater than 0.5, we can classify the email as spam or else not a spam. 
+Logistic regression can be applied to classify response variables where there are more than two classes, though in industry some of the other methods like discriminant analysis are preferred. 
+
+c. Topics: Logistic Regression, Ridge vs Lasso Regression, Principal Component Analysis, Factor Analysis, K-means Clustering, Support Vector Machines, Markov Process, Hidden Markov Model, Decision trees, Random forest or the curse of dimensionality.
+
